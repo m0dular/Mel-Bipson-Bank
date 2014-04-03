@@ -433,7 +433,7 @@ sub bot_start {
 	$irc->yield('register', 'all');
 	$irc->yield(
 			connect => {
-			Password => 'oauth:nb1sqrwi7h6b8z08sbo3727ge5lvlx5',
+			Password => '',
 			Nick     => 'mel_bipson_bank',
 			Username => 'mel_bipson_bank',
 			Ircname  => 'mel_bipson_bank',
