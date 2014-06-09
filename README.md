@@ -23,8 +23,8 @@ Usage: perl bipson_bank.pl -u <twitch_user> -o <oauth_token> -c <#command_channe
 Arguments:
 * -u: Twitch username.  Can be a string.  The username that the bot will use to connect to Twitch.
 * -o: OAuth token.  Can be a string.  The token you will need to connect your user.  Include oauth: in the string, e.g. 'oauth:xxx'
-* -c: Command_channels  Can be one or more comma-separated irc channels, eg #mel_bipson_bank,#thecreaux.  Used to listen for admin commands and output debug info, # is necessary in string.
-* -l: Listen_channels   Can be one or more comma-separated irc channels.  Used to listen for user commands and output betting information # is necessary in string.
+* -c: Command_channels.  Can be one or more comma-separated irc channels, eg #mel_bipson_bank,#thecreaux.  Used to listen for admin commands and output debug info, # is necessary in string.
+* -l: Listen_channels.   Can be one or more comma-separated irc channels.  Used to listen for user commands and output betting information # is necessary in string.
 * -d: Debugging flag.  Can be 0 (off) or 1 (on), default to 0.  Used to turn on/off debugging output for the irc object.  Set this if you want to see the irc debugging and messages the bot receives.
 * -r: Resume from file.  Can be 0 (off) or 1 (on), default to 0.  If turned on, the program looks for and loads an existing bank.txt to the database.
 * -w: Winning_percent.  Can be a decimal number, default to 1.  When specified in conjuction with -r, this is the percentage modifier applied to existing totals loaded from bank.txt.  For example, with -w .25, everyone loaded from bank.txt would keep 25% of their current total.
