@@ -709,11 +709,13 @@ sub on_public {
 # this page has changed, commented out for now
 ##
 			return if (defined $betters -> { $nick } -> { 'funds' });
+
 #			my $user_xml = get ("http://twitch.tv/meta/$nick.xml");
 #			my $parser = XML::LibXML->new();
 #			my $date = $parser->parse_string($user_xml)->findnodes('/meta/created_on')->to_literal->value;
 #			if (($join_cutoff - $date) >= 0) { $betters -> { $nick } -> { 'funds' } = 895; }
 #			else { $betters -> { $nick } -> { 'funds' } = -1; }
+
 			$betters -> { $nick } -> { 'funds' } = 895;
 			&send_bank();
 			}
