@@ -31,6 +31,16 @@ Arguments:
 * -g: Google drive project name.  Can be a string.  Name of the directory under your Google Drive account you want to upload files to. 
 * -s: Chat server IP address.  Can be a string, default to irc.twitch.tv.  IP address for the chat server the bot will try to connect to.  Change this if you are connecting to a private chat or different irc server.
 * -p: Port.  Can be a number, default to 443.  Port used to connect to the chat servers.  Change this if you need to use a custom port.
+* -dbn: PSQL database name.  Can be a string.  The PSQL database the bot will attempt to connect to.
+* -dbh: PSQL host name.  Can be a string, default to localhost.  The PSQL host the bot will attempt to connect to.
+* -dbp: PSQL port.  Can be an int, default to 5432.  The port over which the bot will attempt to connect to the PSQL database.
+* -dbu: PSQL user.  Can be a string, default to postgres.  The user the bot will attempt to connect to the database as.
+* -dbpw: PSQL password.  Can be a string.  The password the bot will use when attempting to connect to PSQL.
+
+# TODO
+
+* Refactor the code, create a package and split into multiple files.
+* Come up with a better way to handle using either PSQL or text files.
 
 # License
 

@@ -9,6 +9,8 @@
 # 5. <conn>	Irc connection functions, admin and user commands
 #####
 
+#use Log::Log4perl qw(:easy);
+#Log::Log4perl->easy_init($DEBUG);
 use warnings;
 use strict;
 use Getopt::Long;
@@ -22,13 +24,15 @@ use Tie::File;
 use LWP::Simple;
 use XML::LibXML;
 use Math::Round qw(:all);
+use DBI;
 use feature "switch";
+
 
 # <vars>
 # Command line args. only -u, -c, and -l required
 my @listen_channels; # irc channels to listen for bets
 my @command_channels; # irc channel to listen for admin commands
-my $debugging = 0;
+my $debug = 0;
 my $gdrive_name;
 my $resume_from_file = 0;
 my $win_pct = 1;
@@ -36,6 +40,14 @@ my $server = 'irc.twitch.tv';
 my $port = 443;
 my $user;
 my $oauth;
+my $db_name = "";
+my $db_host = "localhost";
+my $db_port = 5432;
+my $db_user = "postgres";
+my $db_pass = "";
+my $dbh;
+my $sth;
+my $using_sql = 0;
 
 if ($#ARGV < 2) {
 	print "Usage: perl bipson_bank.pl -u <twitch_user> -c <#command_channel> -l <#channel1,#channel2,...>\nSee README for more options and info";
@@ -45,14 +57,52 @@ GetOptions (	"u=s"  => \$user,
 		"o=s"  =>\$oauth,
 		"c=s" => \@command_channels,
 		"l=s"   => \@listen_channels,
-		"d=i"  => \$debugging,
+		"d=i"  => \$debug,
 		"r=i"  => \$resume_from_file,
 		"w=f"  => \$win_pct,
 		"g=s"  => \$gdrive_name,
 		"s=s"  => \$server,
-		"p=i"  => \$port)
+		"p=i"  => \$port,
+		"dbn=s" => \$db_name,
+		"dbh=s" => \$db_host,
+		"dbp=i" => \$db_port,
+		"dbu=s" => \$db_user,
+		"dbpw=s" =>\$db_pass
+		)
 or die("Error in args, possibly wrong type specified\n");
-@listen_channels = split(',', join(',', @listen_channels));
+
+# PostgreSQL handler
+eval {
+	$dbh = DBI->connect("dbi:Pg:dbname=$db_name;host=$db_host;port=$db_port;",
+			$db_user,
+			$db_pass,
+			{AutoCommit => 0, RaiseError => 1, PrintError => $debug}
+			);
+# Create the tables we need
+	$sth = $dbh->prepare("CREATE TABLE betters (
+		name          varchar(30),
+									funds         int,
+									join_date     date
+									)");
+	$sth->execute();
+	$sth = $dbh->prepare("CREATE TABLE red_betters (
+		name          varchar(30),
+									funds         int,
+									bet						int,
+									potential_win int
+									)");
+	$sth->execute();
+	$sth = $dbh->prepare("CREATE TABLE blue_betters (
+		name          varchar(30),
+									funds         int,
+									bet						int,
+									potential_win int
+									)");
+	$sth->execute();
+	$using_sql = 1;
+} or do {
+	print "Could not connect to database, using text files only\nSet debug flag for error msg\n";
+};
 
 # hashrefs
 my $betters = {};
@@ -65,9 +115,6 @@ my $bank_txt_handle = IO::File->new();
 my $html_bank_handle = IO::File->new();
 my $bets_txt_handle = IO::File->new();
 my $bets_html_handle = IO::File->new();
-my $top_100_handle = IO::File->new();
-my $tool_bet_handle = IO::File->new();
-my $personal_tool_handle = IO::File->new();
 
 my $join_cutoff = 1372636800; # July 1, 2013 in unix time
 
@@ -83,14 +130,13 @@ my $blue_total;
 my $red_odds;
 my $blue_odds;
 my $red_odds_disp;
+@listen_channels = split(',', join(',', @listen_channels));
 
 # Vars and file ids for use with google drive
 my $bets_id;
 my $bank_id;
 my $html_bank_id;
 my $top_id;
-my $tool_bet_id;
-my $personal_tool_id;
 my $dir_id;
 my $children;
 my $gd;
@@ -115,18 +161,8 @@ unless (not defined $gdrive_name) {
 		elsif ($child->title() eq 'bank.html') {
 			$html_bank_id = $child->id();
 		}
-		elsif ($child->title() eq 'top.html') {
-			$top_id = $child->id();
-		}
-		elsif ($child->title() eq 'tool_bet.html') {
-			$tool_bet_id = $child->id();
-		}
-		elsif ($child->title() eq 'personal_tool.html') {
-			$personal_tool_id = $child->id();
-		}
 	}
 }
-
 
 # If -r is specified, load existing totals from bank.txt, applying the percentage specified in -w
 if ($resume_from_file and -s "bank.txt") {
@@ -137,7 +173,12 @@ if ($resume_from_file and -s "bank.txt") {
 			my $name = $split[1];
 			my $total = $split[2];
 			my $new_total = int($win_pct * $total);
-			$betters -> { $name } -> { 'funds' } = ($new_total);
+			if ($using_sql) {
+				$sth = $dbh->prepare("INSERT INTO betters(name,funds) VALUES (?, ?)");
+				$sth->execute($name, $new_total);
+			} else {
+				$betters -> { $name } -> { 'funds' } = ($new_total);
+			}
 		}
 		$bank_txt_handle->close;
 	}
@@ -149,7 +190,7 @@ elsif ($resume_from_file) {
 }
 
 # set up handlers for irc events we care about
-my ($irc) = POE::Component::IRC->spawn(debug => $debugging, UseSSL => 0);
+my ($irc) = POE::Component::IRC->spawn(debug => $debug, UseSSL => 0);
 POE::Session->create(
 		inline_states => {
 		_start     => \&bot_start,
@@ -160,6 +201,8 @@ POE::Session->create(
 );
 
 # <sort>
+
+# hashref and txt file funcs
 # Sort the hash of betters and write it to bank.txt
 sub sort_bank { 
 	my $counter = 1;
@@ -200,94 +243,17 @@ EOF
 }
 
 # Simple html list of top 100 in the bank written to top.html
-sub sort_top_100_html {
-	if ($top_100_handle->open(">top.html") ) {
-			print $top_100_handle <<EOF;
-<html>
-<body>
-<div class="bank-list row-fluid">
-    <div class="col-lg-6">
-        <ol type="1" start="1">
-EOF
-			my $counter = 0;
-			my $betters_size = keys(%$betters);
-			foreach my $name (sort { $betters->{$b}->{'funds'} <=> $betters->{$a}->{'funds'} or $a cmp $b } keys %$betters) {
-				last if $counter == 99;
-				if ($counter == 50) { 
-					print $top_100_handle <<EOF;
-        </ol>
-    </div>
-    <div class="span6">
-        <ol type="1" start="51">
-EOF
-				}
-				my $funds = $betters-> { $name } -> { 'funds' };
-				print $top_100_handle "<li>$name - $funds</li>";
-				$counter++;
-			}
-			if ($betters_size < 50) {
-				for my $i ($betters_size..49) {
-					print $top_100_handle "<li></li>";
-				}
-			}
-			if ($betters_size < 100) {
-				for my $i ($betters_size..99) {
-					print $top_100_handle "<li></li>";
-				}
-			}
-			print $top_100_handle <<EOF;
-        </ol>
-    </div>
-</div>
-</body>
-</html>
-EOF
-			$top_100_handle->close;
-		}
-		else { print "couldn't open top_100 handle\n"; }
-}
-
-# A simple toolbar for each user written to personal_tool.html
-sub sort_personal_tool {
-	my $funds;
-	my $counter = 1;
-
-	if ( $personal_tool_handle->open(">personal_tool.html")) {
-		print $personal_tool_handle <<EOF;
-<html>
-<body>
-EOF
-		foreach  my $name (sort { $betters->{$b}->{'funds'} <=> $betters->{$a}->{'funds'} or $a cmp $b } keys %$betters) {
-			$funds = $betters -> { $name } -> { 'funds' };
-      print $personal_tool_handle <<EOF;
-		<div class="user" id="$name">
-    <div class="name-name">$name</div>
-    <div class="name-money">$funds</div>
-    <div class="name-position">$counter</div>
-</div>
-EOF
-			$counter++;
-		}
-	}
-	else { print "couldn't open personal_tool database\n"; }
-	$personal_tool_handle->close;
-}
 
 sub sort_bets { 
-	my $funds;
-	my $bet;
-	my $potential_win;
-	my $bet_for = "";
-	my $blue_flag = 0;
-	$blue_total = 0;
-	$red_total = 0;
+	my ($funds, $bet, $potential_win, $bet_for);
+	my $blue_flag = 0; my $blue_total = 0; my $red_total = 0;
 
 # Iterate over each set of betters, determining odds and totals
 	foreach my $name (keys %$red_betters) {
 		$bet_for = $red_betters -> { $name } -> { 'bet_for' };
 		$bet = $red_betters -> { $name } -> { 'bet' };
 		$funds = $betters -> { $name } -> { 'funds' };
-		next if ($bet <= 0 or $bet > $funds or $funds == 0);
+		next if ($bet <= 0 or not defined $funds or $bet > $funds or $funds == 0);
 		$red_total += $bet;
 	}
 	foreach my $name (keys %$blue_betters) {
@@ -312,7 +278,7 @@ sub sort_bets {
 		foreach  my $name (sort { $red_betters->{$b}->{'bet'} <=> $red_betters->{$a}->{'bet'} } keys %$red_betters) {
 			$bet = $red_betters -> { $name } -> { 'bet' };
 			$funds = $betters -> { $name } -> { 'funds' };
-			next if ($bet <= 0 or $bet > $funds or $funds == 0);
+			next if ($bet <= 0 or not defined $funds or $bet > $funds or $funds == 0);
 			$potential_win = int($bet * $red_odds); 
 			$potential_win = 1 if $potential_win == 0;
 			$red_betters -> { $name } -> { 'potential_win' } = $potential_win;
@@ -333,7 +299,6 @@ sub sort_bets {
 	else { print "couldn't open bets_txt database\n"; }
 }
 
-# Simple html page with odds and bets, arranged from high to low for red and blue betters
 sub sort_bets_html {
 	my $funds;
 	my $bet;
@@ -394,65 +359,426 @@ EOF
 	}
 	else { print "couldn't open database\n"; }
 }
+# sql sort functions
+sub sort_bank_sql {
+	my $counter = 1;
+	if ( $bank_txt_handle->open(">bank.txt")) {
+		my $sql = "SELECT DISTINCT * FROM betters ORDER BY funds DESC";
+		my $array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+		foreach my $hashref (@$array_ref) {
+			print $bank_txt_handle "$counter. $hashref->{ 'name' } $hashref->{ 'funds' }\n";
+			$counter++;
+		}
+		$bank_txt_handle->close;
+	}
+	else { print "couldn't open bank_txt database\n"; }
+}
 
-sub sort_tool_bet_html {
-	if ($tool_bet_handle->open(">tool_bet.html") ) {
-		print $tool_bet_handle <<EOF;
+# A simple html display for current rankings written to bank.html
+sub sort_bank_html_sql {
+	if ( $html_bank_handle->open(">bank.html")) {
+		print $html_bank_handle <<EOF;
 <html>
 <body>
-<div class="col-lg-5 tool-bets-red"_html>
-    <strong>RED</strong> - $red_total
-    <br>
-    <strong>$red_player</strong>
-</div>
-<div class="col-lg-2 tool-bets-vs">
-    <strong>ODDS: $red_odds_disp</strong>
-</div>
-<div class="col-lg-5 tool-bets-blue">
-    <strong>BLUE</strong> - $blue_total
-    <br>
-    <strong>$blue_player</strong>
-</div>
-</html>
-</body>
+<ol type="1" start="1">
 EOF
-		$tool_bet_handle->close;
-		&send_personal_tool();
+	my $sql = "SELECT DISTINCT * FROM betters ORDER BY funds DESC";
+	my $array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+		foreach my $hashref (@$array_ref) {
+			my $name = $hashref->{ 'name' };
+			my $funds = $hashref->{ 'funds' };
+			print $html_bank_handle "<a id=$name><li>$name - $funds</a></li><br>";
+		}
+		print $html_bank_handle <<EOF;
+\n</ol>   
+</body>
+</html>
+EOF
+	}
+	else { print "couldn't open bank_html database\n";}
+	$html_bank_handle->close;
+}
+
+
+sub sort_bets_sql {
+	my ($funds, $bet, $potential_win, $sql, $sth, $array_ref, $nick );
+	$blue_total = 0; $red_total = 0;
+	
+	$sql = "SELECT SUM (bet) as TOTAL FROM red_betters";
+	$red_total = $dbh->selectrow_array($sql);
+	if (!$red_total) { $red_total = 0; }
+
+	$sql = "SELECT SUM (bet) as TOTAL FROM blue_betters";
+	$blue_total = $dbh->selectrow_array($sql);
+	if (!$blue_total) { $blue_total = 0; }
+
+	if ($red_total eq 0) { $red_odds = 1 } else { $red_odds = $blue_total/$red_total; }
+	if ($blue_total eq 0) { $blue_odds = 1} else { $blue_odds = $red_total/$blue_total; }
+	$red_odds_disp = nearest(.001, $red_odds);
+
+	foreach my $channel (@listen_channels) {
+		$irc->call(privmsg => $channel => "Red Total: $red_total Blue Total: $blue_total");
+	}
+
+	$sql = "SELECT * FROM red_betters";
+	$array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$array_ref) {
+		$nick = $hashref-> { 'name' };
+		$bet = $hashref-> { 'bet' };
+		$potential_win = int($bet * $red_odds);
+		$potential_win = 1 if $potential_win == 0;
+		$sql = "UPDATE red_betters SET potential_win =? WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($potential_win, $nick);
+	}
+	$sql = "SELECT * FROM blue_betters";
+	$array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$array_ref) {
+		$nick = $hashref-> { 'name' };
+		$bet = $hashref-> { 'bet' };
+		$potential_win = int($bet * $blue_odds);
+		$potential_win = 1 if $potential_win == 0;
+		$sql = "UPDATE blue_betters SET potential_win = ? WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($potential_win, $nick);
 	}
 }
 
+# Simple html page with odds and bets, arranged from high to low for red and blue betters
+sub sort_bets_html_sql {
+	my $name;
+	my $funds;
+	my $bet;
+	my $potential_win;
+	my $sql;
+	my $array_ref;
+
+	if ( $bets_html_handle->open(">bets.html")) {
+		print $bets_html_handle <<EOF;
+<html>
+<body>
+<div class="col-lg-5 full-bets-red">
+<strong style="font-size: 18px;">RED</strong> - ($red_total)
+<br>
+<strong>$red_player</strong>
+<br>
+EOF
+	$sql = "SELECT * FROM red_betters ORDER BY bet DESC";
+	$array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$array_ref) {
+		$name = $hashref->{ 'name' };
+		$bet = $hashref->{ 'bet' };
+		$funds = $hashref->{ 'funds' };
+		$potential_win = $hashref->{ 'potential_win' };
+		unless ($bet <= 0 or $bet > $funds or $funds == 0) {
+			print $bets_html_handle <<EOF;
+<div class="$name"> $name - $bet ($potential_win) </div>
+<br>
+EOF
+		}
+	}
+	print $bets_html_handle <<EOF;
+</div>
+<div class="col-lg-2 full-bets-odds">
+<strong>ODDS</strong>
+$red_odds_disp/1
+</div>
+<div class="col-lg-5 full-bets-blue">
+<strong style="font-size: 18px;">BLUE</strong> - ($blue_total)
+<br>
+<strong>$blue_player</strong>
+<br>
+EOF
+
+	$sql = "SELECT DISTINCT * FROM blue_betters ORDER BY bet DESC";
+	$array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$array_ref) {
+		$name = $hashref->{ 'name' };
+		$bet = $hashref->{ 'bet' };
+		$funds = $hashref->{ 'funds' };
+		$potential_win = $hashref->{ 'potential_win' };
+		unless ($bet <= 0 or $bet > $funds or $funds == 0) {
+			print $bets_html_handle <<EOF;
+<div class="$name"> $name - $bet ($potential_win) </div>
+<br>
+EOF
+		}
+	}
+	print $bets_html_handle <<EOF;
+</div>
+</body>
+</html>
+EOF
+
+		$bets_html_handle->close;
+	} else { print "couldn't open database\n"; }
+}
+
+
 # <help>
+# hashref and txt file functions
+sub add_better {
+	my $nick = $_[0];
+	return if (defined $betters -> { $nick } -> { 'funds' });
+	$betters -> { $nick } -> { 'funds' } = 895;
+}
+
+sub add_red_better {
+	my $nick = $_[0];
+	my $bet = $_[1];
+	$red_betters -> { $nick } -> { 'bet' } = $bet;
+	if (exists $blue_betters -> { $nick} ) {
+		delete $blue_betters -> { $nick };
+	}
+}
+
+sub add_blue_better {
+	my $nick = $_[0];
+	my $bet = $_[1];
+	$blue_betters -> { $nick } -> { 'bet' } = $bet;
+	if (exists $red_betters -> { $nick} ) {
+		delete $red_betters -> { $nick };
+	}
+}
+
+sub add_red_all {
+	my $nick = $_[0];
+	my $max_bet = $betters -> { $nick } -> { 'funds' };
+	$red_betters -> { $nick } -> { 'bet' } = $max_bet;
+	if (exists $blue_betters -> { $nick} ) {
+		delete $blue_betters -> { $nick };
+	}
+}
+
+sub add_blue_all {
+	my $nick = $_[0];
+	my $max_bet = $betters -> { $nick } -> { 'funds' };
+	$blue_betters -> { $nick } -> { 'bet' } = $max_bet;
+	if (exists $red_betters -> { $nick} ) {
+		delete $red_betters -> { $nick };
+	}
+}
+
+sub add_red_any { 
+	my $nick = $_[0];
+	my $max_bet = $betters -> { $nick } -> { 'funds' };
+	my $rand = int(rand($max_bet));
+	$rand = 1 if $rand == 0;
+	if (exists $blue_betters -> { $nick} ) {
+		delete $blue_betters -> { $nick };
+	}
+	$red_betters -> { $nick } -> { 'bet' } = $rand;
+}
+
+sub add_blue_any { 
+	my $nick = $_[0];
+	my $max_bet = $betters -> { $nick } -> { 'funds' };
+	my $rand = int(rand($max_bet));
+	$rand = 1 if $rand == 0;
+	if (exists $red_betters -> { $nick} ) {
+		delete $red_betters -> { $nick };
+	}
+	$blue_betters -> { $nick } -> { 'bet' } = $rand;
+}
+
+sub give {
+	my $nick = $_[0]; my $give_to = $_[1]; my $give_amount = $_[2];
+	return if not defined $betters -> { $give_to } or $give_amount <= 0 or $give_amount > $betters -> { $nick } -> { 'funds' };
+	my $funds_from = $betters -> { $nick } -> { 'funds' };
+	my $funds_to = $betters -> { $give_to } -> { 'funds' };
+	$betters -> { $nick } -> { 'funds' } = $funds_from - $give_amount;
+	$betters -> { $give_to } -> { 'funds' } = $funds_to + $give_amount;
+}
+
+
+# sql functions
+sub add_better_sql {
+	my $nick = $_[0];
+	my $sql = "SELECT * FROM betters WHERE EXISTS (SELECT 1 FROM betters WHERE name=?)";
+	my $sth = $dbh->prepare($sql);
+	my $exists = $sth->execute($nick);
+	return if ($exists ne "0E0");
+	$sql = "INSERT INTO betters(name,funds) VALUES (?,?)";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick, 895);
+}
+
+sub add_red_better_sql {
+	my $nick = $_[0];
+	my $bet = $_[1];
+	my $exists;
+	my $sth;
+	my $sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM red_betters WHERE name=?)";
+
+	$sth = $dbh->prepare($sql);
+	$exists = $sth->execute($nick);
+
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO red_betters(name,funds) SELECT name,funds FROM betters WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($nick);
+	}
+	$sql = "UPDATE red_betters SET bet =? WHERE name =?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($bet, $nick);
+	&remove_blue_sql($nick);
+}
+
+sub add_red_any_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM betters WHERE name=?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick);
+	my $hashref = $sth->fetchrow_hashref();
+	my $max_bet = $hashref -> { 'funds' };
+	my $rand = int(rand($max_bet));
+	$rand = 1 if $rand == 0;
+	$sql = "INSERT INTO red_betters(name,funds,bet) VALUES (?,?,?)";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick, $max_bet, $rand);
+	&remove_blue_sql($nick);
+}
+
+sub add_blue_any_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM betters WHERE name=?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick);
+	my $hashref = $sth->fetchrow_hashref();
+	my $max_bet = $hashref -> { 'funds' };
+	my $rand = int(rand($max_bet));
+	$rand = 1 if $rand == 0;
+	$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES (?,?,?)";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick, $max_bet, $rand);
+	&remove_red_sql($nick);
+}
+
+sub add_blue_all_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM betters WHERE name=?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick);
+	my $hashref = $sth->fetchrow_hashref();
+	my $max_bet = $hashref -> { 'funds' };
+	$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES (?,?,?)";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick, $max_bet, $max_bet);
+	&remove_red_sql($nick);
+}
+
+sub add_red_all_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM betters WHERE name=?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick);
+	my $hashref = $sth->fetchrow_hashref();
+	my $max_bet = $hashref -> { 'funds' };
+	$sql = "INSERT INTO red_betters(name,funds,bet) VALUES (?,?,?)";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick, $max_bet, $max_bet);
+	&remove_blue_sql($nick);
+}
+
+
+sub remove_red_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM red_betters WHERE name=?)";
+	$sth = $dbh->prepare($sql);
+	my $exists = $sth->execute($nick);
+	if ($exists ne "0E0") {
+		$sql = "DELETE FROM red_betters WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($nick);
+	}
+}
+
+sub remove_blue_sql { 
+	my ($sql, $sth);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM blue_betters WHERE EXISTS (SELECT 1 FROM blue_betters WHERE name=?)";
+	$sth = $dbh->prepare($sql);
+	my $exists = $sth->execute($nick);
+	if ($exists ne "0E0") {
+		$sql = "DELETE FROM blue_betters WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($nick);
+	}
+}
+
+sub add_blue_better_sql {
+	my $nick = $_[0];
+	my $bet = $_[1];
+	my $exists;
+	my $sth;
+	my $sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM blue_betters WHERE name=?)";
+
+	$sth = $dbh->prepare($sql);
+	$exists = $sth->execute($nick);
+
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO blue_betters(name,funds) SELECT name,funds FROM betters WHERE name=?";
+		$sth = $dbh->prepare($sql);
+		$sth->execute($nick);
+	}
+	$sql = "UPDATE blue_betters SET bet =? WHERE name =?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($bet, $nick);
+	&remove_red_sql($nick);
+}
+
+sub give_sql {
+	my $nick = $_[0]; my $give_to = $_[1]; my $give_amount = $_[2];
+	my ($sql, $sth, $giver, $can_give, $receiver);
+	$sql = "SELECT * FROM betters WHERE name =?";
+	$sth = $dbh->prepare($sql);
+	$sth->execute($nick);
+	$giver = $sth->fetchrow_hashref();
+	$can_give = $sth->execute($give_to);
+	$receiver = $sth->fetchrow_hashref();
+
+	return if ($can_give eq "0E0" or $give_amount <=0 or $give_amount > $giver -> { 'funds' } );
+	my $giver_amount = $giver -> { 'funds' } - $give_amount;
+	my $receiver_amount = $receiver -> { 'funds' } + $give_amount;
+
+	$sql = "UPDATE betters SET funds = t.funds FROM (VALUES ($giver_amount,'$nick'), ($receiver_amount,'$give_to') ) AS t (funds, name) WHERE betters.name = t.name";
+	$sth = $dbh->prepare($sql);
+	$sth->execute();
+}
+
 sub send_bets {
-	&sort_bets();
+	if ($using_sql) {
+		&sort_bets_sql();
+		&sort_bets_html_sql();
+	} else {
+		&sort_bets();
+		&sort_bets_html();
+	}
 # skip sending to google drives if no drive name specified
 	unless (not defined $gdrive_name) {
-		&sort_bets_html();
 		$gd->file_upload ("bets.html", $dir_id, $bets_id);
 		system ("mv", "bets.html", "bets.html.$$");
 	}
 }
 
 sub send_bank {
-	&sort_bank();
+	if ($using_sql) {
+		&sort_bank_sql();
+		} else {
+			&sort_bank();
+		}
 	unless (not defined $gdrive_name) {
-		&sort_bank_html();
+		if ($using_sql) {
+			&sort_bank_html_sql();
+		} else {
+			&sort_bank_html();
+		}
 		$gd->file_upload ("bank.html", $dir_id, $html_bank_id);
-	}
-}
-sub send_top_100 {
-	unless (not defined $gdrive_name) {
-		&sort_top_100_html();
-		$gd->file_upload ("top.html", $dir_id, $top_id);
-	}
-}
-sub send_tool_bet {
-	unless (not defined $gdrive_name) {
-		$gd->file_upload ("tool_bet.html", $dir_id, $tool_bet_id);
-	}
-}
-sub send_personal_tool {
-	unless (not defined $gdrive_name) {
-		$gd->file_upload ("personal_tool.html", $dir_id, $personal_tool_id);
 	}
 }
 
@@ -478,9 +804,22 @@ sub close {
 # Add people who type !add during betting to active betters
 ##
 	if (scalar(@queued_betters) > 0) {
-		foreach my $name (@queued_betters) {
-			next if (defined $betters -> { $name } -> { 'funds' });
-			$betters -> { $name } -> { 'funds' } = 895;
+		if ($using_sql) {
+			my ($sql, $sth, $exists);
+			foreach my $name (@queued_betters) {
+				$sql = "SELECT * FROM betters WHERE EXISTS (SELECT 1 FROM betters WHERE name=?)";
+				$sth = $dbh->prepare($sql);
+				my $exists = $sth->execute($name);
+				next if ($exists ne "0E0");
+				$sql = "INSERT INTO betters VALUES (?,?)";
+				$sth = $dbh->prepare($sql);
+				$sth->execute($name, 895);
+			}
+		} else {
+			foreach my $name (@queued_betters) {
+				next if (defined $betters -> { $name } -> { 'funds' });
+				$betters -> { $name } -> { 'funds' } = 895;
+			}
 		}
 		undef @queued_betters;
 		&send_bank();
@@ -495,20 +834,83 @@ sub bailout {
 	}
 	else {
 		my $bailout_amt = $_[0];
-		if ($bank_txt_handle->open("<bank.txt")) {
-			while (my $line = <$bank_txt_handle> ) {
-				chomp($line);
-				my @split = (split / /, $line);
-				my $name = $split[1];
-				my $total = $split[2];
-				if ($total != -1 and $total < $bailout_amt) {
+		if ($using_sql) {
+			my ($sql, $sth);
+			$sql = "UPDATE betters SET funds=? WHERE funds <?";
+			$sth = $dbh->prepare($sql);
+			$sth->execute($bailout_amt, $bailout_amt);
+		} else {
+			foreach my $name (keys %$betters) {
+				my $total = $betters -> { $name } -> { 'funds' };
+				if (not defined $total or $total != -1 and $total < $bailout_amt) {
 					$betters -> { $name } -> { 'funds' } = $bailout_amt;
 				}
 			}
-		&send_bank();
 		}
-		else { print "couldn't open bank_txt database\n"; }
+		&send_bank();
 	}
+}
+
+sub dispense_bucks_sql {
+	my ($sql, $sth, $arrayref);
+	my $color = lc($_[0]);
+	if ($color ne 'red' and $color ne 'blue') {
+		return;
+	}
+	if ($color eq 'red') {
+		foreach my $channel (@listen_channels) {
+			$irc->call(privmsg => $channel => "$red_player(RED) wins! Payouts to RED!");
+		}
+	}
+	else {
+		foreach my $channel (@listen_channels) {
+			$irc->call(privmsg => $channel => "$blue_player(BLUE) wins! Payouts to BLUE!");
+		}
+	}
+	my ($name, $cur_bet, $bet_for, $cur_funds, $new_total, $potential_win);
+
+	$sql = "SELECT DISTINCT * FROM red_betters";
+	$arrayref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$arrayref) {
+		$bet_for = 'red';
+		$name = $hashref->{ 'name' };
+		$cur_bet = $hashref->{ 'bet' };
+		$cur_funds = $hashref->{ 'funds' };
+		$potential_win = $hashref->{ 'potential_win' };
+
+		unless ($cur_bet <= 0 or not defined $cur_bet or $cur_bet > $cur_funds or $cur_funds <= 0) {
+			if ($bet_for eq $color) {
+				$new_total = $cur_funds + $potential_win;
+			} else {
+				$new_total = $cur_funds - $cur_bet;
+			}
+			$sql = "UPDATE betters SET funds =? WHERE name=?"; $sth = $dbh->prepare($sql);
+			$sth->execute($new_total, $name);
+		}
+	}
+	$sql = "SELECT DISTINCT * FROM blue_betters";
+	$arrayref = $dbh->selectall_arrayref($sql, { Slice => {} });
+	foreach my $hashref (@$arrayref) {
+		$bet_for = 'blue';
+		$name = $hashref->{ 'name' };
+		$cur_bet = $hashref->{ 'bet' };
+		$cur_funds = $hashref->{ 'funds' };
+		$potential_win = $hashref->{ 'potential_win' };
+
+		unless ($cur_bet <= 0 or not defined $cur_bet or $cur_bet > $cur_funds or $cur_funds <= 0) {
+			if ($bet_for eq $color) {
+				$new_total = $cur_funds + $potential_win;
+			} else {
+				$new_total = $cur_funds - $cur_bet;
+			}
+			$sql = "UPDATE betters SET funds =? WHERE name=?"; $sth = $dbh->prepare($sql);
+			$sth->execute($new_total, $name);
+		}
+	}
+	$sql = "TRUNCATE red_betters, blue_betters";
+	$sth = $dbh->prepare($sql);
+	$sth->execute();
+	&send_bank();
 }
 
 sub dispense_bucks {
@@ -535,7 +937,7 @@ sub dispense_bucks {
 		$bet_for = 'red';
 		$cur_bet = $red_betters-> { $name } -> { 'bet' };
 		$cur_funds = $betters -> { $name } -> { 'funds' };
-		next if $cur_bet <= 0 or $cur_bet > $cur_funds or $cur_funds <= 0; # skip this better if he bet 0, bet more than his total funds, or has no funds
+		next if $cur_bet <= 0 or not defined $cur_bet or $cur_bet > $cur_funds or $cur_funds <= 0; # skip this better if he bet 0, bet more than his total funds, or has no funds
 
 		if ($bet_for eq $color) {
 			$new_total = $cur_funds + $red_betters -> { $name } -> { 'potential_win' };
@@ -564,7 +966,6 @@ sub dispense_bucks {
 	
 
 	&send_bank();
-	&send_top_100();
 }
 
 # <conn>
@@ -615,7 +1016,7 @@ sub on_public {
 			}
 			when (/^!win\s+\w+\s*$/i) {
 				my $color = (split / /, $_)[1];
-	         &dispense_bucks($color);
+				if ($using_sql) { &dispense_bucks_sql($color) } else { &dispense_bucks($color); }
 			}
 			when (/^!betmsg\s*$/i) {
 				foreach my $channel (@listen_channels) {
@@ -645,51 +1046,38 @@ sub on_public {
 		given ($msg) {
 			when (/^!betred\s+\d+\s*$/i) {
 				$bet = (split / /, $msg)[1];
-				$red_betters -> { $nick } -> { 'bet' } = $bet;
-				if (exists $blue_betters -> { $nick} ) {
-					delete $blue_betters -> { $nick };
+				if ($using_sql) {
+					&add_red_better_sql($nick, $bet);
+				} else {
+					&add_red_better($nick, $bet);
 				}
 			}
 			when (/^!betblue\s+\d+\s*$/i) {
 				$bet = (split / /, $msg)[1];
-				$blue_betters -> { $nick } -> { 'bet' } = $bet;
-				if (exists $red_betters -> { $nick} ) {
-					delete $red_betters -> { $nick };
+				if ($using_sql) {
+					&add_blue_better_sql($nick, $bet);
+				} else {
+					&add_blue_better($nick, $bet);
 				}
 			}
 			when (/^!bet\w+\s+\w+\s*$/i) {
 				my $arg0 = lc((split / /, $msg)[0]);
 				my $cmd = lc((split / /, $msg)[1]);
 				if ($cmd eq 'all') {
-					my $max_bet = $betters -> { $nick } -> { 'funds' };
+					my $max_bet; 
 					if ($arg0 =~ /red/) {
-						$red_betters -> { $nick } -> { 'bet' } = $max_bet;
-						if (exists $blue_betters -> { $nick} ) {
-							delete $blue_betters -> { $nick };
-						}
+						if ($using_sql) { &add_red_all_sql($nick);} else { &add_red_all($nick); }
 					}
 					elsif ($arg0 =~ /blue/) {
-						if (exists $red_betters -> { $nick} ) {
-							delete $red_betters -> { $nick };
-						}
-						$blue_betters -> { $nick } -> { 'bet' } = $max_bet;
+						if ($using_sql) { &add_blue_all_sql($nick);} else { &add_blue_all($nick); }
 					}
 				}
 				elsif ($cmd eq 'any') {
-					my $max_bet = $betters -> { $nick } -> { 'funds' };
-					my $rand = int(rand($max_bet));
-					$rand = 1 if $rand == 0;
 					if ($arg0 =~ /red/) {
-						if (exists $blue_betters -> { $nick} ) {
-							delete $blue_betters -> { $nick };
-						}
-						$red_betters -> { $nick } -> { 'bet' } = $rand;
+						if ($using_sql) { &add_red_any_sql($nick);} else { &add_red_any($nick); }
 					}
 					elsif ($arg0 =~ /blue/) {
-						if (exists $red_betters -> { $nick} ) {
-							delete $red_betters -> { $nick };
-						}
-						$blue_betters -> { $nick } -> { 'bet' } = $rand;
+						if ($using_sql) { &add_blue_any_sql($nick);} else { &add_blue_any($nick); }
 					}
 				}
 			}
@@ -702,31 +1090,34 @@ sub on_public {
 	else {
 		given ($msg) {
 			when (/^!add\s*$/i) {
+
 ##
 # Parse the user's page for their metadata, 
 # only add to the bank if account is older than
 # the cutoff date to prevent making new accounts
 # this page has changed, commented out for now
-##
-			return if (defined $betters -> { $nick } -> { 'funds' });
-
+#
 #			my $user_xml = get ("http://twitch.tv/meta/$nick.xml");
 #			my $parser = XML::LibXML->new();
 #			my $date = $parser->parse_string($user_xml)->findnodes('/meta/created_on')->to_literal->value;
 #			if (($join_cutoff - $date) >= 0) { $betters -> { $nick } -> { 'funds' } = 895; }
-#			else { $betters -> { $nick } -> { 'funds' } = -1; }
+##			else { $betters -> { $nick } -> { 'funds' } = -1; }
 
-			$betters -> { $nick } -> { 'funds' } = 895;
-			&send_bank();
+				if ($using_sql) { 
+					&add_better_sql($nick);
+				} else {
+					&add_better($nick);
+				}
+				&send_bank();
 			}
 			when (/^!give\s+.+\s+\d+\s*$/i) {
-				my $give_to = (split / /, $msg)[1];
-				my $give_amount = (split / /, $msg)[2];
-				return if not defined $betters -> { $give_to } or $give_amount <= 0 or $give_amount > $betters -> { $nick } -> { 'funds' };
-				my $funds_from = $betters -> { $nick } -> { 'funds' };
-				my $funds_to = $betters -> { $give_to } -> { 'funds' };
-				$betters -> { $nick } -> { 'funds' } = $funds_from - $give_amount;
-				$betters -> { $give_to } -> { 'funds' } = $funds_to + $give_amount;
+				my $give_to = lc((split / /, $msg)[1]);
+				my $give_amount = lc((split / /, $msg)[2]);
+				if ($using_sql) {
+					&give_sql($nick, $give_to, $give_amount);
+				} else { 
+					&give($nick, $give_to, $give_amount);
+				}
 				&send_bank();
 			}
 		}
