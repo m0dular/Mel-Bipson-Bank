@@ -174,8 +174,8 @@ if ($resume_from_file and -s "bank.txt") {
 			my $total = $split[2];
 			my $new_total = int($win_pct * $total);
 			if ($using_sql) {
-				$sth = $dbh->prepare("INSERT INTO betters(name,funds) VALUES (?, ?)");
-				$sth->execute($name, $new_total);
+				$sth = $dbh->prepare("INSERT INTO betters(name,funds) VALUES ('$name', '$new_total')");
+				$sth->execute();
 			} else {
 				$betters -> { $name } -> { 'funds' } = ($new_total);
 			}
@@ -427,9 +427,9 @@ sub sort_bets_sql {
 		$bet = $hashref-> { 'bet' };
 		$potential_win = int($bet * $red_odds);
 		$potential_win = 1 if $potential_win == 0;
-		$sql = "UPDATE red_betters SET potential_win =? WHERE name=?";
+		$sql = "UPDATE red_betters SET potential_win ='$potential_win' WHERE name='$nick'";
 		$sth = $dbh->prepare($sql);
-		$sth->execute($potential_win, $nick);
+		$sth->execute();
 	}
 	$sql = "SELECT * FROM blue_betters";
 	$array_ref = $dbh->selectall_arrayref($sql, { Slice => {} });
@@ -438,9 +438,9 @@ sub sort_bets_sql {
 		$bet = $hashref-> { 'bet' };
 		$potential_win = int($bet * $blue_odds);
 		$potential_win = 1 if $potential_win == 0;
-		$sql = "UPDATE blue_betters SET potential_win = ? WHERE name=?";
+		$sql = "UPDATE blue_betters SET potential_win = '$potential_win' WHERE name='$nick'";
 		$sth = $dbh->prepare($sql);
-		$sth->execute($potential_win, $nick);
+		$sth->execute();
 	}
 }
 
@@ -594,93 +594,122 @@ sub give {
 # sql functions
 sub add_better_sql {
 	my $nick = $_[0];
-	my $sql = "SELECT * FROM betters WHERE EXISTS (SELECT 1 FROM betters WHERE name=?)";
-	my $sth = $dbh->prepare($sql);
-	my $exists = $sth->execute($nick);
-	return if ($exists ne "0E0");
-	$sql = "INSERT INTO betters(name,funds) VALUES (?,?)";
+	my $sql = "INSERT INTO betters(name,funds)  SELECT '$nick',895 WHERE NOT EXISTS (SELECT 1 FROM betters WHERE name='$nick')";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick, 895);
+	$sth->execute();
 }
 
 sub add_red_better_sql {
 	my $nick = $_[0];
 	my $bet = $_[1];
 	my $exists;
-	my $sth;
-	my $sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM red_betters WHERE name=?)";
-
+	my ($sth, $sql, $insert, $upsert);
+	$sql = "UPDATE red_betters SET bet ='$bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$exists = $sth->execute($nick);
-
+	$exists = $sth->execute();
+# if we updated 0 records, insert instead
 	if ($exists eq "0E0") {
-		$sql = "INSERT INTO red_betters(name,funds) SELECT name,funds FROM betters WHERE name=?";
+		$sql = "INSERT INTO red_betters(name,funds,bet) SELECT name,funds,'$bet' FROM betters WHERE name='$nick'";
 		$sth = $dbh->prepare($sql);
-		$sth->execute($nick);
+		$sth->execute();
 	}
-	$sql = "UPDATE red_betters SET bet =? WHERE name =?";
-	$sth = $dbh->prepare($sql);
-	$sth->execute($bet, $nick);
 	&remove_blue_sql($nick);
 }
 
-sub add_red_any_sql { 
-	my ($sql, $sth);
+sub add_blue_better_sql {
 	my $nick = $_[0];
-	$sql = "SELECT * FROM betters WHERE name=?";
+	my $bet = $_[1];
+	my $exists;
+	my ($sth, $sql, $insert, $upsert);
+	$sql = "UPDATE blue_betters SET bet ='$bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick);
+	$exists = $sth->execute();
+# if we updated 0 records, insert instead
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO blue_betters(name,funds,bet) SELECT name,funds,'$bet' FROM betters WHERE name='$nick'";
+		$sth = $dbh->prepare($sql);
+		$sth->execute();
+	}
+	&remove_red_sql($nick);
+}
+
+sub add_red_any_sql { 
+	my ($sql, $sth, $exists);
+	my $nick = $_[0];
+	$sql = "SELECT * FROM betters WHERE name='$nick'";
+	$sth = $dbh->prepare($sql);
+	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
 	my $rand = int(rand($max_bet));
 	$rand = 1 if $rand == 0;
-	$sql = "INSERT INTO red_betters(name,funds,bet) VALUES (?,?,?)";
+	$sql = "UPDATE red_betters SET bet ='$rand' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick, $max_bet, $rand);
+	$exists = $sth->execute();
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO red_betters(name,funds,bet) VALUES ('$nick','$max_bet','$rand')";
+		$sth = $dbh->prepare($sql);
+		$sth->execute();
+	}
 	&remove_blue_sql($nick);
 }
 
 sub add_blue_any_sql { 
-	my ($sql, $sth);
+	my ($sql, $sth, $exists);
 	my $nick = $_[0];
-	$sql = "SELECT * FROM betters WHERE name=?";
+	$sql = "SELECT * FROM betters WHERE name='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick);
+	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
 	my $rand = int(rand($max_bet));
 	$rand = 1 if $rand == 0;
-	$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES (?,?,?)";
+	$sql = "UPDATE blue_betters SET bet ='$rand' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick, $max_bet, $rand);
+	$exists = $sth->execute();
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES ('$nick','$max_bet','$rand')";
+		$sth = $dbh->prepare($sql);
+		$sth->execute();
+	}
 	&remove_red_sql($nick);
 }
 
 sub add_blue_all_sql { 
-	my ($sql, $sth);
+	my ($sql, $sth, $exists);
 	my $nick = $_[0];
-	$sql = "SELECT * FROM betters WHERE name=?";
+	$sql = "SELECT * FROM betters WHERE name='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick);
+	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
-	$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES (?,?,?)";
+	$sql = "UPDATE blue_betters SET bet ='$max_bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick, $max_bet, $max_bet);
+	$exists = $sth->execute();
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO blue_betters(name,funds,bet) VALUES ('$nick','$max_bet','$max_bet')";
+		$sth = $dbh->prepare($sql);
+		$sth->execute();
+	}
 	&remove_red_sql($nick);
 }
 
 sub add_red_all_sql { 
-	my ($sql, $sth);
+	my ($sql, $sth, $exists);
 	my $nick = $_[0];
-	$sql = "SELECT * FROM betters WHERE name=?";
+	$sql = "SELECT * FROM betters WHERE name='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick);
+	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
-	$sql = "INSERT INTO red_betters(name,funds,bet) VALUES (?,?,?)";
+	$sql = "UPDATE red_betters SET bet ='$max_bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
-	$sth->execute($nick, $max_bet, $max_bet);
+	$exists = $sth->execute();
+	if ($exists eq "0E0") {
+		$sql = "INSERT INTO red_betters(name,funds,bet) VALUES ('$nick','$max_bet','$max_bet')";
+		$sth = $dbh->prepare($sql);
+		$sth->execute();
+	}
 	&remove_blue_sql($nick);
 }
 
@@ -688,49 +717,19 @@ sub add_red_all_sql {
 sub remove_red_sql { 
 	my ($sql, $sth);
 	my $nick = $_[0];
-	$sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM red_betters WHERE name=?)";
+	$sql = "DELETE FROM red_betters WHERE name='$nick'";
 	$sth = $dbh->prepare($sql);
-	my $exists = $sth->execute($nick);
-	if ($exists ne "0E0") {
-		$sql = "DELETE FROM red_betters WHERE name=?";
-		$sth = $dbh->prepare($sql);
-		$sth->execute($nick);
-	}
+	$sth->execute();
 }
 
 sub remove_blue_sql { 
 	my ($sql, $sth);
 	my $nick = $_[0];
-	$sql = "SELECT * FROM blue_betters WHERE EXISTS (SELECT 1 FROM blue_betters WHERE name=?)";
+	$sql = "DELETE FROM blue_betters WHERE name='$nick'";
 	$sth = $dbh->prepare($sql);
-	my $exists = $sth->execute($nick);
-	if ($exists ne "0E0") {
-		$sql = "DELETE FROM blue_betters WHERE name=?";
-		$sth = $dbh->prepare($sql);
-		$sth->execute($nick);
-	}
+	$sth->execute();
 }
 
-sub add_blue_better_sql {
-	my $nick = $_[0];
-	my $bet = $_[1];
-	my $exists;
-	my $sth;
-	my $sql = "SELECT * FROM red_betters WHERE EXISTS (SELECT 1 FROM blue_betters WHERE name=?)";
-
-	$sth = $dbh->prepare($sql);
-	$exists = $sth->execute($nick);
-
-	if ($exists eq "0E0") {
-		$sql = "INSERT INTO blue_betters(name,funds) SELECT name,funds FROM betters WHERE name=?";
-		$sth = $dbh->prepare($sql);
-		$sth->execute($nick);
-	}
-	$sql = "UPDATE blue_betters SET bet =? WHERE name =?";
-	$sth = $dbh->prepare($sql);
-	$sth->execute($bet, $nick);
-	&remove_red_sql($nick);
-}
 
 sub give_sql {
 	my $nick = $_[0]; my $give_to = $_[1]; my $give_amount = $_[2];
@@ -807,13 +806,13 @@ sub close {
 		if ($using_sql) {
 			my ($sql, $sth, $exists);
 			foreach my $name (@queued_betters) {
-				$sql = "SELECT * FROM betters WHERE EXISTS (SELECT 1 FROM betters WHERE name=?)";
+				$sql = "SELECT * FROM betters WHERE EXISTS (SELECT 1 FROM betters WHERE name='$name')";
 				$sth = $dbh->prepare($sql);
-				my $exists = $sth->execute($name);
+				my $exists = $sth->execute();
 				next if ($exists ne "0E0");
-				$sql = "INSERT INTO betters VALUES (?,?)";
+				$sql = "INSERT INTO betters VALUES ('$name',895)";
 				$sth = $dbh->prepare($sql);
-				$sth->execute($name, 895);
+				$sth->execute();
 			}
 		} else {
 			foreach my $name (@queued_betters) {
@@ -836,9 +835,9 @@ sub bailout {
 		my $bailout_amt = $_[0];
 		if ($using_sql) {
 			my ($sql, $sth);
-			$sql = "UPDATE betters SET funds=? WHERE funds <?";
+			$sql = "UPDATE betters SET funds='$bailout_amt' WHERE funds <'$bailout_amt'";
 			$sth = $dbh->prepare($sql);
-			$sth->execute($bailout_amt, $bailout_amt);
+			$sth->execute();
 		} else {
 			foreach my $name (keys %$betters) {
 				my $total = $betters -> { $name } -> { 'funds' };
@@ -884,8 +883,8 @@ sub dispense_bucks_sql {
 			} else {
 				$new_total = $cur_funds - $cur_bet;
 			}
-			$sql = "UPDATE betters SET funds =? WHERE name=?"; $sth = $dbh->prepare($sql);
-			$sth->execute($new_total, $name);
+			$sql = "UPDATE betters SET funds ='$new_total' WHERE name='$name'"; $sth = $dbh->prepare($sql);
+			$sth->execute();
 		}
 	}
 	$sql = "SELECT DISTINCT * FROM blue_betters";
@@ -903,8 +902,8 @@ sub dispense_bucks_sql {
 			} else {
 				$new_total = $cur_funds - $cur_bet;
 			}
-			$sql = "UPDATE betters SET funds =? WHERE name=?"; $sth = $dbh->prepare($sql);
-			$sth->execute($new_total, $name);
+			$sql = "UPDATE betters SET funds ='$new_total' WHERE name='$name'"; $sth = $dbh->prepare($sql);
+			$sth->execute();
 		}
 	}
 	$sql = "TRUNCATE red_betters, blue_betters";
@@ -998,10 +997,6 @@ sub on_connect {
 sub on_public {
 	my ($kernel, $who, $where, $msg) = @_[KERNEL, ARG0, ARG1, ARG2];
 	my $nick = lc((split /!/, $who)[0]);
-	if (not ($nick ~~ @admins) and not defined $betters -> { $nick } ) {
-		$_ = $msg;
-		return unless m/^!add\s*$/;
-	}
 
 	# look for admin commands
 	if ($nick ~~ @admins) {
@@ -1027,11 +1022,17 @@ sub on_public {
 				if ($betting_open) {
 					$betting_open = 0;
 				}
+				if ($using_sql) {
+					my $sql = "TRUNCATE red_betters,blue_betters";
+					my $sth = $dbh->prepare($sql);
+					$sth->execute();
+				} else {
+					undef $red_betters;
+					undef $blue_betters;
+				}
 				foreach my $channel (@listen_channels) {
 					$irc->call(privmsg => $channel => "MrDestructoid Bets are CANCELED!!! MrDestructoid");
 				}
-				undef $red_betters;
-				undef $blue_betters;
 			}
 			when (/^!bailout\s+\d+\s*$/i) {
 				my $bailout = (split / /, $_)[1];
