@@ -642,6 +642,7 @@ sub add_red_any_sql {
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
 	my $rand = int(rand($max_bet));
+	return if not defined $max_bet;
 	$rand = 1 if $rand == 0;
 	$sql = "UPDATE red_betters SET bet ='$rand' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
@@ -662,6 +663,7 @@ sub add_blue_any_sql {
 	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
+	return if not defined $max_bet;
 	my $rand = int(rand($max_bet));
 	$rand = 1 if $rand == 0;
 	$sql = "UPDATE blue_betters SET bet ='$rand' WHERE name ='$nick'";
@@ -683,6 +685,7 @@ sub add_blue_all_sql {
 	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
+	return if not defined $max_bet;
 	$sql = "UPDATE blue_betters SET bet ='$max_bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
 	$exists = $sth->execute();
@@ -702,6 +705,7 @@ sub add_red_all_sql {
 	$sth->execute();
 	my $hashref = $sth->fetchrow_hashref();
 	my $max_bet = $hashref -> { 'funds' };
+	return if not defined $max_bet;
 	$sql = "UPDATE red_betters SET bet ='$max_bet' WHERE name ='$nick'";
 	$sth = $dbh->prepare($sql);
 	$exists = $sth->execute();
